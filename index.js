@@ -243,7 +243,6 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Handle photo upload
   if (msg.photo) {
     const photo = msg.photo[msg.photo.length - 1];
     const fileId = photo.file_id;
@@ -261,7 +260,7 @@ bot.on('message', async (msg) => {
         method: 'get',
         url: fileLink,
         responseType: 'stream',
-        timeout: 30000 // 30s timeout
+        timeout: 30000
       });
 
       const cloudinaryUpload = cloudinary.uploader.upload_stream(
@@ -273,9 +272,7 @@ bot.on('message', async (msg) => {
           }
 
           userSessions[chatId].screenshotUrl = result.secure_url;
-          await bot.sendMessage(chatId, '📝 Now, enter your *UPI name* or *transaction ID*:', {
-            parse_mode: 'Markdown'
-          });
+          await bot.sendMessage(chatId, '📝 Now, enter your *UPI name* or *transaction ID*:', { parse_mode: 'Markdown' });
         }
       );
 
@@ -285,7 +282,6 @@ bot.on('message', async (msg) => {
       console.error('Image download error:', err.message);
       await bot.sendMessage(chatId, '⚠️ Could not fetch your image. Try again later.', { parse_mode: 'Markdown' });
     }
-
     return;
   }
 
