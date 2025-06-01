@@ -1,6 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const axiosRetry = require('axios-retry').default;
 const cloudinary = require('cloudinary').v2;
 const stream = require('stream');
 const { promisify } = require('util');
@@ -11,7 +12,7 @@ const finished = promisify(stream.finished);
 const requiredEnvVars = ['BOT_TOKEN', 'SHEET_WEBHOOK_URL', 'ADMIN_CHAT_ID', 'CLOUD_NAME', 'CLOUD_API_KEY', 'CLOUD_API_SECRET', 'WEBHOOK_URL'];
 requiredEnvVars.forEach((varName) => {
   if (!process.env[varName]) {
-    console.error(`Error: Environment variable ${varName} is not set.`);
+    console.error(`Error: Environment variable ${varName} is not set. For WEBHOOK_URL, use your Vercel deployment URL (e.g., https://your-vercel-app.vercel.app).`);
     process.exit(1);
   }
 });
@@ -21,12 +22,20 @@ const bot = new TelegramBot(process.env.BOT_TOKEN);
 const SHEET_WEBHOOK_URL = process.env.SHEET_WEBHOOK_URL;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'secret123'; // Fallback secret
 
 // Cloudinary config
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
   api_key: process.env.CLOUD_API_KEY,
   api_secret: process.env.CLOUD_API_SECRET
+});
+
+// Configure axios with retries and timeout
+axiosRetry(axios, {
+  retries: 3,
+  retryDelay: (retryCount) => retryCount * 1000, // Exponential backoff: 1s, 2s, 3s
+  retryCondition: (error) => error.code === 'ECONNABORTED' || error.message.includes('socket hang up')
 });
 
 // Express server setup
@@ -38,18 +47,34 @@ app.get('/', (req, res) => {
   res.status(200).send('SubSplit Telegram Bot Server is running!');
 });
 
-// Webhook route
-app.post('/webhook', (req, res) => {
-  bot.processUpdate(req.body); // Process incoming Telegram updates
-  res.status(200).send('OK'); // Respond to Telegram
+// Webhook route with secret token
+app.post(`/webhook/${WEBHOOK_SECRET}`, (req, res) => {
+  try {
+    bot.processUpdate(req.body); // Process incoming Telegram updates
+    res.status(200).send('OK');
+  } catch (err) {
+    console.error('Error processing webhook update:', err.message);
+    res.status(500).send('Error processing update');
+  }
 });
 
+// Retry webhook setup with exponential backoff
+const setWebhookWithRetry = async (retries = 3, delay = 1000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await bot.setWebHook(`${WEBHOOK_URL}/webhook/${WEBHOOK_SECRET}`);
+      console.log(`Webhook set to ${WEBHOOK_URL}/webhook/${WEBHOOK_SECRET}`);
+      return;
+    } catch (err) {
+      console.error(`Error setting webhook (attempt ${i + 1}/${retries}):`, err.message);
+      if (i < retries - 1) await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+    }
+  }
+  console.error('Failed to set webhook after retries.');
+};
+
 // Set webhook on startup
-bot.setWebHook(`${WEBHOOK_URL}/webhook`).then(() => {
-  console.log(`Webhook set to ${WEBHOOK_URL}/webhook`);
-}).catch((err) => {
-  console.error('Error setting webhook:', err.message);
-});
+setWebhookWithRetry();
 
 // Sessions
 const userSessions = {};
@@ -59,7 +84,7 @@ const plans = {
   '🎧 Spotify': { price: 50, duration: 30 },
   '🎬 Netflix': { price: 80, duration: 30 },
   '📦 Amazon Prime': { price: 60, duration: 30 },
-  '📺 Hotstar': { price: 500, duration: 365 }, // Updated to 1 year
+  '📺 Hotstar': { price: 500, duration: 365 },
   '🎧 Spotify + 🎬 Netflix': { price: 120, duration: 30 },
   '📦 Prime + 📺 Hotstar': { price: 100, duration: 30 }
 };
@@ -79,7 +104,7 @@ function escapeMarkdownV2(text) {
 // Session cleanup (every hour)
 setInterval(() => {
   const now = Date.now();
-  const oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
+  const oneHour = 60 * 60 * 1000;
   for (const chatId in userSessions) {
     if (!userSessions[chatId].lastActivity || now - userSessions[chatId].lastActivity > oneHour) {
       delete userSessions[chatId];
@@ -126,6 +151,7 @@ bot.onText(/\/help/, (msg) => {
 /status — Check your active subscription status\n
 /plans — List available plans\n
 /contact — Get support contact information\n
+/cancel — Cancel current subscription process\n
 /help — Show this help message\n\n
 For support, contact the admin at subsplithub@gmail.com.`;
 
@@ -168,6 +194,17 @@ bot.onText(/\/contact/, (msg) => {
   const message = `📞 *Contact Support*\n\nFor any issues or questions, reach out to our admin at subsplithub@gmail.com.`;
 
   bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+// /cancel command
+bot.onText(/\/cancel/, (msg) => {
+  const chatId = msg.chat.id;
+  if (userSessions[chatId]) {
+    delete userSessions[chatId];
+    bot.sendMessage(chatId, `🗑️ Subscription process canceled. Use /start to begin again.`, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(chatId, `ℹ️ No active subscription process to cancel.`, { parse_mode: 'Markdown' });
+  }
 });
 
 // /list_users command (admin-only)
@@ -223,7 +260,8 @@ bot.on('message', async (msg) => {
       const response = await axios({
         method: 'get',
         url: fileLink,
-        responseType: 'stream'
+        responseType: 'stream',
+        timeout: 30000 // 30s timeout
       });
 
       const cloudinaryUpload = cloudinary.uploader.upload_stream(
@@ -245,7 +283,7 @@ bot.on('message', async (msg) => {
       await finished(cloudinaryUpload);
     } catch (err) {
       console.error('Image download error:', err.message);
-      await bot.sendMessage(chatId, '⚠️ Could not fetch your image. Try again.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '⚠️ Could not fetch your image. Try again later.', { parse_mode: 'Markdown' });
     }
 
     return;
@@ -277,12 +315,12 @@ bot.on('message', async (msg) => {
         upiInfo,
         screenshot: screenshotUrl,
         expiryDate
-      });
+      }, { timeout: 30000 });
 
       await bot.sendMessage(chatId,
         `✅ *Thank you!* Your subscription has been recorded.\nWe'll verify and add you shortly.\nYour plan is valid until *${expiryDate}* 📅`,
-        { parse_mode: 'Markdown'
-      });
+        { parse_mode: 'Markdown' }
+      );
 
       // Notify admin with properly escaped message
       const adminMessage =
