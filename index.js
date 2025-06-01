@@ -8,7 +8,7 @@ const express = require('express');
 const finished = promisify(stream.finished);
 
 // Validate environment variables
-const requiredEnvVars = ['BOT_TOKEN', 'SHEET_WEBHOOK_URL', 'ADMIN_CHAT_ID', 'CLOUD_NAME', 'CLOUD_API_KEY', 'CLOUD_API_SECRET'];
+const requiredEnvVars = ['BOT_TOKEN', 'SHEET_WEBHOOK_URL', 'ADMIN_CHAT_ID', 'CLOUD_NAME', 'CLOUD_API_KEY', 'CLOUD_API_SECRET', 'WEBHOOK_URL'];
 requiredEnvVars.forEach((varName) => {
   if (!process.env[varName]) {
     console.error(`Error: Environment variable ${varName} is not set.`);
@@ -17,9 +17,10 @@ requiredEnvVars.forEach((varName) => {
 });
 
 // Config
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.BOT_TOKEN);
 const SHEET_WEBHOOK_URL = process.env.SHEET_WEBHOOK_URL;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // Cloudinary config
 cloudinary.config({
@@ -30,14 +31,24 @@ cloudinary.config({
 
 // Express server setup
 const app = express();
-const PORT = 5000;
+app.use(express.json()); // Parse JSON bodies for webhook
 
+// Home route
 app.get('/', (req, res) => {
   res.status(200).send('SubSplit Telegram Bot Server is running!');
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// Webhook route
+app.post('/webhook', (req, res) => {
+  bot.processUpdate(req.body); // Process incoming Telegram updates
+  res.status(200).send('OK'); // Respond to Telegram
+});
+
+// Set webhook on startup
+bot.setWebHook(`${WEBHOOK_URL}/webhook`).then(() => {
+  console.log(`Webhook set to ${WEBHOOK_URL}/webhook`);
+}).catch((err) => {
+  console.error('Error setting webhook:', err.message);
 });
 
 // Sessions
@@ -48,7 +59,7 @@ const plans = {
   '🎧 Spotify': { price: 50, duration: 30 },
   '🎬 Netflix': { price: 80, duration: 30 },
   '📦 Amazon Prime': { price: 60, duration: 30 },
-  '📺 Hotstar': { price: 50, duration: 30 },
+  '📺 Hotstar': { price: 500, duration: 365 }, // Updated to 1 year
   '🎧 Spotify + 🎬 Netflix': { price: 120, duration: 30 },
   '📦 Prime + 📺 Hotstar': { price: 100, duration: 30 }
 };
@@ -82,8 +93,13 @@ bot.onText(/\/start/, (msg) => {
   const name = msg.from.first_name;
   userSessions[chatId] = { lastActivity: Date.now() };
 
-  const message = `Hey ${name}! 👋\nWelcome to *SubSplit* — save money by sharing streaming subscriptions!\n\nHere are our affordable monthly plans:\n
-🎧 *Spotify* — ₹50\n🎬 *Netflix* — ₹80\n📦 *Amazon Prime* — ₹60\n📺 *Jio Hotstar* — ₹50\n🎧 *Spotify + Netflix* — ₹120\n📦 *Prime + Hotstar* — ₹100\n
+  const message = `Hey ${name}! 👋\nWelcome to *SubSplit* — save money by sharing streaming subscriptions!\n\nHere are our affordable plans:\n
+🎧 *Spotify* — ₹50 (30 days)\n
+🎬 *Netflix* — ₹80 (30 days)\n
+📦 *Amazon Prime* — ₹60 (30 days)\n
+📺 *Hotstar* — ₹500 (1 year)\n
+🎧 *Spotify + Netflix* — ₹120 (30 days)\n
+📦 *Prime + Hotstar* — ₹100 (30 days)\n
 You're saving over 70% compared to personal subscriptions! 🎉\n
 Select a plan to continue:`;
 
@@ -111,7 +127,7 @@ bot.onText(/\/help/, (msg) => {
 /plans — List available plans\n
 /contact — Get support contact information\n
 /help — Show this help message\n\n
-For support, contact the admin at @SubSplitSupport.`;
+For support, contact the admin at subsplithub@gmail.com.`;
 
   bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
@@ -153,17 +169,6 @@ bot.onText(/\/contact/, (msg) => {
 
   bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
-
-// /cancel command
-// bot.onText(/\/cancel/, (msg) => {
-//   const chatId = msg.chat.id;
-//   if (userSessions[chatId]) {
-//     delete userSessions[chatId];
-//     bot.sendMessage(chatId, `🗑️ Subscription process canceled. Use /start to begin again.`, { parse_mode: 'Markdown' });
-//   } else {
-//     bot.sendMessage(chatId, `ℹ️ No active subscription process to cancel.`, { parse_mode: 'Markdown' });
-//   }
-// });
 
 // /list_users command (admin-only)
 bot.onText(/\/list_users/, async (msg) => {
@@ -276,8 +281,8 @@ bot.on('message', async (msg) => {
 
       await bot.sendMessage(chatId,
         `✅ *Thank you!* Your subscription has been recorded.\nWe'll verify and add you shortly.\nYour plan is valid until *${expiryDate}* 📅`,
-        { parse_mode: 'Markdown' }
-      );
+        { parse_mode: 'Markdown'
+      });
 
       // Notify admin with properly escaped message
       const adminMessage =
@@ -302,6 +307,9 @@ bot.on('message', async (msg) => {
 });
 
 // Error handling for bot
-bot.on('polling_error', (error) => {
-  console.error('Polling error:', error.message);
+bot.on('webhook_error', (error) => {
+  console.error('Webhook error:', error.message);
 });
+
+// Export for Vercel
+module.exports = app;
